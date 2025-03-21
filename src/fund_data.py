@@ -21,7 +21,18 @@ def get_fund_info(fund_code):
             'fund_company': '未获取到',
             'fund_type': '未获取到',
             'fund_code': fund_code,
-            'is_money_fund': False
+            'is_money_fund': False,
+            
+            # 新增字段初始化
+            'fund_manager': '未获取到',
+            'fund_manager_id': '未获取到',
+            'is_buy': False,
+            'min_purchase': 0,
+            'fund_short_name': '未获取到',
+            'fund_company_id': '未获取到',
+            'other_name': '',
+            'update_date': '',
+            'investment_themes': []
         }
         
         headers = {
@@ -66,15 +77,53 @@ def get_fund_info(fund_code):
                         if item['CODE'] == fund_code:
                             if fund_info['fund_name'] == '未获取到':
                                 fund_info['fund_name'] = item['NAME']
-                            if fund_info['fund_company'] == '未获取到':
-                                fund_info['fund_company'] = item['FundBaseInfo']['JJGS']
-                            if fund_info['fund_type'] == '未获取到':
-                                # 处理基金类型编码
-                                fund_type_code = item['FundBaseInfo'].get('FUNDTYPE', '')
-                                fund_type = map_fund_type_code(fund_type_code)
-                                if fund_type != '未知类型':
+                            
+                            # 添加新的字段
+                            base_info = item.get('FundBaseInfo', {})
+                            if base_info:
+                                # 基金经理信息
+                                fund_info['fund_manager'] = base_info.get('JJJL', '未获取到')
+                                fund_info['fund_manager_id'] = base_info.get('JJJLID', '未获取到')
+                                
+                                # 申购相关信息
+                                isbuy_value = base_info.get('ISBUY', '')
+                                # 修正申购状态的判断逻辑：
+                                # 1为可申购，2为暂停申购，空字符串或其他值为未知
+                                if isbuy_value == '1':
+                                    fund_info['is_buy'] = True
+                                elif isbuy_value == '2' or isbuy_value == '0':
+                                    fund_info['is_buy'] = False
+                                else:
+                                    fund_info['is_buy'] = None
+                                
+                                fund_info['min_purchase'] = base_info.get('MINSG', 0)
+                                
+                                # 其他基础信息
+                                fund_info['fund_short_name'] = base_info.get('SHORTNAME', '未获取到')
+                                fund_info['fund_company_id'] = base_info.get('JJGSID', '未获取到')
+                                fund_info['other_name'] = base_info.get('OTHERNAME', '')
+                                fund_info['update_date'] = base_info.get('FSRQ', '')
+                                
+                                # 直接使用FTYPE作为基金类型
+                                if fund_info['fund_type'] == '未获取到':
+                                    fund_type = base_info.get('FTYPE', '未知类型')
                                     fund_info['fund_type'] = fund_type
+                                    # 更新is_money_fund标志，检查是否为货币型或保本型
                                     fund_info['is_money_fund'] = '货币型' in fund_type or '保本型' in fund_type
+                                
+                                if fund_info['fund_company'] == '未获取到':
+                                    fund_info['fund_company'] = base_info.get('JJGS', '未获取到')
+                            
+                            # 添加主题投资信息
+                            if 'ZTJJInfo' in item and item['ZTJJInfo']:
+                                themes = []
+                                for theme in item['ZTJJInfo']:
+                                    themes.append({
+                                        'type': theme.get('TTYPE', ''),
+                                        'name': theme.get('TTYPENAME', '')
+                                    })
+                                fund_info['investment_themes'] = themes
+                            
                             break
             except Exception as e:
                 print(f"解析搜索API数据时发生错误: {str(e)}")
@@ -190,9 +239,30 @@ def get_fund_data(fund_code, start_date=None, end_date=None, fill_missing=False)
         cached_data, is_today = get_cached_fund_data(fund_code)
         
         if cached_data is not None:
-            if is_today:
-                # 如果是今天的数据，直接返回
+            # 获取基金类型信息，判断是否为货币基金
+            fund_info = get_fund_info(fund_code)
+            is_money_fund = fund_info.get('is_money_fund', False)
+            
+            # 检查缓存数据是否包含累计净值（对于非货币基金）
+            has_acc_nav = 'acc_nav' in cached_data.columns
+            needs_acc_nav = not is_money_fund  # 非货币基金需要累计净值
+            
+            # 读取元数据信息
+            meta_file = os.path.join(CACHE_DIR, f"{fund_code}_meta.json")
+            with open(meta_file, 'r') as f:
+                meta_data = json.load(f)
+            
+            if is_today and (has_acc_nav or not needs_acc_nav):
+                # 如果是今天的数据且包含所需的累计净值数据(或者是货币基金不需要累计净值)，直接返回
+                print(f"使用今日已更新的缓存数据（最后更新：{meta_data['last_update']}）")
                 return cached_data
+            elif is_today and needs_acc_nav and not has_acc_nav:
+                # 如果是今天的数据但非货币基金缺少累计净值，需要重新获取
+                print(f"缓存数据缺少累计净值，重新获取完整数据...")
+                df = fetch_fund_data_from_api(fund_code, None, None)
+                if not df.empty:
+                    save_fund_data_to_cache(fund_code, df)
+                return df
             
             # 获取缓存的最后一个日期
             last_cache_date = cached_data['date'].max()
@@ -200,10 +270,7 @@ def get_fund_data(fund_code, start_date=None, end_date=None, fill_missing=False)
             
             # 如果缓存数据不是最新的，获取增量更新
             if current_date.date() > last_cache_date.date():
-                # 检查元数据中的最后更新时间
-                meta_file = os.path.join(CACHE_DIR, f"{fund_code}_meta.json")
-                with open(meta_file, 'r') as f:
-                    meta_data = json.load(f)
+                # 获取元数据里的最后更新时间
                 last_update = pd.to_datetime(meta_data['last_update'])
                 current_time = pd.to_datetime(datetime.datetime.now())
                 
@@ -215,7 +282,7 @@ def get_fund_data(fund_code, start_date=None, end_date=None, fill_missing=False)
                 is_weekend = today.weekday() >= 5  # 周六和周日
                 
                 # 判断是否需要更新
-                if hours_diff < 24 and (is_weekend or last_cache_date.date() == pd.to_datetime(end_date).date()):
+                if hours_diff < 24 and (is_weekend or last_cache_date.date() == pd.to_datetime(end_date).date()) and (has_acc_nav or not needs_acc_nav):
                     print(f"缓存数据已在24小时内更新过（{last_update.strftime('%Y-%m-%d %H:%M:%S')}），无需频繁更新")
                     df = cached_data
                     return df
@@ -226,6 +293,17 @@ def get_fund_data(fund_code, start_date=None, end_date=None, fill_missing=False)
                 new_data = fetch_fund_data_from_api(fund_code, increment_start, end_date)
                 
                 if not new_data.empty:
+                    # 判断新数据中是否包含累计净值
+                    includes_acc_nav = 'acc_nav' in new_data.columns
+                    
+                    # 判断缓存数据是否包含累计净值，如果不包含但新数据中有，则需要重新获取完整数据
+                    if includes_acc_nav and not has_acc_nav and needs_acc_nav:
+                        print("检测到新数据包含累计净值而缓存数据不包含，重新获取完整数据...")
+                        df = fetch_fund_data_from_api(fund_code, None, None)
+                        if not df.empty:
+                            save_fund_data_to_cache(fund_code, df)
+                        return df
+                    
                     # 合并新旧数据
                     df = pd.concat([cached_data, new_data], ignore_index=True)
                     df = df.drop_duplicates(subset=['date']).sort_values('date')
@@ -236,6 +314,14 @@ def get_fund_data(fund_code, start_date=None, end_date=None, fill_missing=False)
                     print("没有新数据需要更新")
                     df = cached_data
             else:
+                # 即使缓存数据是最新的，如果是非货币基金但缺少累计净值，也需要重新获取
+                if needs_acc_nav and not has_acc_nav:
+                    print("缓存数据缺少累计净值，重新获取完整数据...")
+                    df = fetch_fund_data_from_api(fund_code, None, None)
+                    if not df.empty:
+                        save_fund_data_to_cache(fund_code, df)
+                    return df
+                
                 print("缓存数据已是最新，无需更新")
                 df = cached_data
         else:
@@ -247,6 +333,9 @@ def get_fund_data(fund_code, start_date=None, end_date=None, fill_missing=False)
         
         # 填充非交易日数据
         if fill_missing and not df.empty:
+            # 检查是否存在acc_nav列
+            has_acc_nav = 'acc_nav' in df.columns
+            
             date_range = pd.date_range(start=df['date'].min(), end=df['date'].max(), freq='D')
             df = df.set_index('date').reindex(date_range)
             df = df.ffill()  # 使用ffill()替代fillna(method='ffill')
@@ -327,8 +416,17 @@ def fetch_fund_data_from_api(fund_code, start_date, end_date):
             df['nav'] = df['nav'].replace({'\\*': '', ',': ''}, regex=True)  # 移除星号和逗号
             df['nav'] = pd.to_numeric(df['nav'], errors='coerce')
             
+            # 转换累计净值列为数值类型（对于非货币基金）
+            if not is_money_fund and 'acc_nav' in df.columns:
+                df['acc_nav'] = df['acc_nav'].replace({'\\*': '', ',': ''}, regex=True)
+                df['acc_nav'] = pd.to_numeric(df['acc_nav'], errors='coerce')
+            
             # 合并数据
-            all_data = pd.concat([all_data, df[['date', 'nav']]], ignore_index=True)
+            if is_money_fund:
+                all_data = pd.concat([all_data, df[['date', 'nav']]], ignore_index=True)
+            else:
+                # 对于非货币基金，保存单位净值和累计净值
+                all_data = pd.concat([all_data, df[['date', 'nav', 'acc_nav']]], ignore_index=True)
             
             print(f"第{page}页: 获取到{len(df)}条数据，最早日期: {df['date'].min().strftime('%Y-%m-%d')}")
             
