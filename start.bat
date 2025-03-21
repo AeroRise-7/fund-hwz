@@ -14,19 +14,7 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-echo 正在检查并安装依赖...
-pip install -r requirements.txt
-
-if %errorlevel% neq 0 (
-    echo [警告] 依赖安装可能不完整，程序可能无法正常运行。
-    echo 请尝试手动执行: pip install -r requirements.txt
-    pause
-) else (
-    echo 依赖安装完成！
-)
-
-echo.
-echo 正在启动基金分析工具...
+echo 正在尝试启动基金分析工具...
 echo 请稍候，应用程序窗口即将打开...
 echo.
 echo 新功能更新:
@@ -38,6 +26,23 @@ echo    b) 净值区间曲线
 streamlit run main.py
 
 if %errorlevel% neq 0 (
-    echo [错误] 程序启动失败，请检查错误信息。
-    pause
+    echo [错误] 程序启动失败，尝试安装依赖...
+    
+    echo 正在安装依赖...
+    pip install -r requirements.txt --no-build-isolation
+    
+    if %errorlevel% neq 0 (
+        echo [警告] 依赖安装可能不完整，程序可能无法正常运行。
+        echo 请尝试手动执行以下命令安装预编译的二进制包:
+        echo pip install --only-binary=:all: -r requirements.txt
+        pause
+    ) else (
+        echo 依赖安装完成！尝试再次启动程序...
+        streamlit run main.py
+        
+        if %errorlevel% neq 0 (
+            echo [错误] 程序再次启动失败，请检查错误信息。
+            pause
+        )
+    )
 )
